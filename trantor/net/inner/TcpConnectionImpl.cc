@@ -771,6 +771,8 @@ void TcpConnectionImpl::writeCallback()
         if (ioChannelPtr_->isWriting())
         {
             assert(!writeBufferList_.empty());
+            if(writeBufferList_.empty())
+                return;
             auto writeBuffer_ = writeBufferList_.front();
             if (!writeBuffer_->isFile())
             {
