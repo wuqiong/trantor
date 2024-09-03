@@ -13,22 +13,22 @@
  */
 
 #pragma once
-#include <trantor/net/callbacks.h>
-#include <trantor/utils/NonCopyable.h>
-#include <trantor/utils/Logger.h>
+#include <trantor/exports.h>
 #include <trantor/net/EventLoopThreadPool.h>
 #include <trantor/net/InetAddress.h>
 #include <trantor/net/TcpConnection.h>
+#include <trantor/net/callbacks.h>
+#include <trantor/utils/Logger.h>
+#include <trantor/utils/NonCopyable.h>
 #include <trantor/utils/TimingWheel.h>
-#include <trantor/exports.h>
-#include <string>
+#include <csignal>
 #include <memory>
 #include <set>
-#include <signal.h>
+#include <string>
+
 namespace trantor
 {
 class Acceptor;
-class SSLContext;
 /**
  * @brief This class represents a TCP server.
  *
@@ -48,7 +48,7 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
      */
     TcpServer(EventLoop *loop,
               const InetAddress &address,
-              const std::string &name,
+              std::string name,
               bool reUseAddr = true,
               bool reUsePort = true);
     ~TcpServer();
@@ -68,6 +68,7 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
     /**
      * @brief Set the number of event loops in which the I/O of connections to
      * the server is handled.
+     * An EventLoopThreadPool is created and managed by TcpServer.
      *
      * @param num
      */
@@ -76,11 +77,14 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
         assert(!started_);
         loopPoolPtr_ = std::make_shared<EventLoopThreadPool>(num);
         loopPoolPtr_->start();
+        ioLoops_ = loopPoolPtr_->getLoops();
+        numIoLoops_ = ioLoops_.size();
     }
 
     /**
      * @brief Set the event loops pool in which the I/O of connections to
      * the server is handled.
+     * A shared_ptr of EventLoopThreadPool is copied.
      *
      * @param pool
      */
@@ -89,7 +93,26 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
         assert(pool->size() > 0);
         assert(!started_);
         loopPoolPtr_ = pool;
-        loopPoolPtr_->start();
+        loopPoolPtr_->start();  // TODO: should not start by TcpServer
+        ioLoops_ = loopPoolPtr_->getLoops();
+        numIoLoops_ = ioLoops_.size();
+    }
+
+    /**
+     * @brief Set the event loops in which the I/O of connections to
+     * the server is handled.
+     * The loops are managed by caller. Caller should ensure that ioLoops
+     * lives longer than TcpServer.
+     *
+     * @param ioLoops
+     */
+    void setIoLoops(const std::vector<trantor::EventLoop *> &ioLoops)
+    {
+        assert(!ioLoops.empty());
+        assert(!started_);
+        ioLoops_ = ioLoops;
+        numIoLoops_ = ioLoops_.size();
+        loopPoolPtr_.reset();
     }
 
     /**
@@ -138,6 +161,19 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
     }
 
     /**
+     * @brief Set the before listen setsockopt callback.
+     *
+     * @param cb This callback will be called before the listen
+     */
+    void setBeforeListenSockOptCallback(SockOptCallback cb);
+    /**
+     * @brief Set the after accept setsockopt callback.
+     *
+     * @param cb This callback will be called after accept
+     */
+    void setAfterAcceptSockOptCallback(SockOptCallback cb);
+
+    /**
      * @brief Get the name of the server.
      *
      * @return const std::string&
@@ -152,7 +188,7 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
      *
      * @return const std::string
      */
-    const std::string ipPort() const;
+    std::string ipPort() const;
 
     /**
      * @brief Get the address of the server.
@@ -178,7 +214,7 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
      */
     std::vector<EventLoop *> getIoLoops() const
     {
-        return loopPoolPtr_->getLoops();
+        return ioLoops_;
     }
 
     /**
@@ -204,21 +240,33 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
      * server.
      * @param sslConfCmds The commands used to call the SSL_CONF_cmd function in
      * OpenSSL.
+     * @param caPath The path of the certificate authority file.
      * @note It's well known that TLS 1.0 and 1.1 are not considered secure in
      * 2020. And it's a good practice to only use TLS 1.2 and above.
      */
-    void enableSSL(const std::string &certPath,
-                   const std::string &keyPath,
-                   bool useOldTLS = false,
-                   const std::vector<std::pair<std::string, std::string>>
-                       &sslConfCmds = {},
-                   const std::string &caPath = "");
+    [[deprecated("Use enableSSL(TLSPolicyPtr) instead")]] void enableSSL(
+        const std::string &certPath,
+        const std::string &keyPath,
+        bool useOldTLS = false,
+        const std::vector<std::pair<std::string, std::string>> &sslConfCmds =
+            {},
+        const std::string &caPath = "");
+    /**
+     * @brief Enable SSL encryption.
+     */
+    void enableSSL(TLSPolicyPtr policy)
+    {
+        policyPtr_ = std::move(policy);
+        sslContextPtr_ = newSSLContext(*policyPtr_, true);
+    }
 
   private:
-    EventLoop *loop_;
     void handleCloseInLoop(const TcpConnectionPtr &connectionPtr);
-    std::unique_ptr<Acceptor> acceptorPtr_;
     void newConnection(int fd, const InetAddress &peer);
+    void connectionClosed(const TcpConnectionPtr &connectionPtr);
+
+    EventLoop *loop_;
+    std::unique_ptr<Acceptor> acceptorPtr_;
     std::string serverName_;
     std::set<TcpConnectionPtr> connSet_;
 
@@ -228,8 +276,18 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
 
     size_t idleTimeout_{0};
     std::map<EventLoop *, std::shared_ptr<TimingWheel>> timingWheelMap_;
-    void connectionClosed(const TcpConnectionPtr &connectionPtr);
+
+    // `loopPoolPtr_` may and may not hold the internal thread pool.
+    // We should not access it directly in codes.
+    // Instead, we should use its delegation variable `ioLoops_`.
     std::shared_ptr<EventLoopThreadPool> loopPoolPtr_;
+    // If one of `setIoLoopNum()`, `setIoLoopThreadPool()` and `setIoLoops()` is
+    // called, `ioLoops_` will hold the loops passed in.
+    // Otherwise, it should contain only one element, which is `loop_`.
+    std::vector<EventLoop *> ioLoops_;
+    size_t nextLoopIdx_{0};
+    size_t numIoLoops_{0};
+
 #ifndef _WIN32
     class IgnoreSigPipe
     {
@@ -244,9 +302,8 @@ class TRANTOR_EXPORT TcpServer : NonCopyable
     IgnoreSigPipe initObj;
 #endif
     bool started_{false};
-
-    // OpenSSL SSL context Object;
-    std::shared_ptr<SSLContext> sslCtxPtr_;
+    TLSPolicyPtr policyPtr_{nullptr};
+    SSLContextPtr sslContextPtr_{nullptr};
 };
 
 }  // namespace trantor

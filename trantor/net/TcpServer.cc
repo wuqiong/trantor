@@ -12,31 +12,33 @@
  *
  */
 
-#include "Acceptor.h"
-#include "inner/TcpConnectionImpl.h"
 #include <trantor/net/TcpServer.h>
 #include <trantor/utils/Logger.h>
 #include <functional>
 #include <vector>
+#include "Acceptor.h"
+#include "inner/TcpConnectionImpl.h"
 using namespace trantor;
 using namespace std::placeholders;
 
 TcpServer::TcpServer(EventLoop *loop,
                      const InetAddress &address,
-                     const std::string &name,
+                     std::string name,
                      bool reUseAddr,
                      bool reUsePort)
     : loop_(loop),
       acceptorPtr_(new Acceptor(loop, address, reUseAddr, reUsePort)),
-      serverName_(name),
+      serverName_(std::move(name)),
       recvMessageCallback_([](const TcpConnectionPtr &, MsgBuffer *buffer) {
           LOG_ERROR << "unhandled recv message [" << buffer->readableBytes()
                     << " bytes]";
           buffer->retrieveAll();
-      })
+      }),
+      ioLoops_({loop}),
+      numIoLoops_(1)
 {
     acceptorPtr_->setNewConnectionCallback(
-        std::bind(&TcpServer::newConnection, this, _1, _2));
+        [this](int fd, const InetAddress &peer) { newConnection(fd, peer); });
 }
 
 TcpServer::~TcpServer()
@@ -45,39 +47,37 @@ TcpServer::~TcpServer()
     LOG_TRACE << "TcpServer::~TcpServer [" << serverName_ << "] destructing";
 }
 
+void TcpServer::setBeforeListenSockOptCallback(SockOptCallback cb)
+{
+    acceptorPtr_->setBeforeListenSockOptCallback(std::move(cb));
+}
+
+void TcpServer::setAfterAcceptSockOptCallback(SockOptCallback cb)
+{
+    acceptorPtr_->setAfterAcceptSockOptCallback(std::move(cb));
+}
+
 void TcpServer::newConnection(int sockfd, const InetAddress &peer)
 {
     LOG_TRACE << "new connection:fd=" << sockfd
               << " address=" << peer.toIpPort();
-    // test code for blocking or nonblocking
-    //    std::vector<char> str(1024*1024*100);
-    //    for(int i=0;i<str.size();i++)
-    //        str[i]='A';
-    //    LOG_TRACE<<"vector size:"<<str.size();
-    //    size_t n=write(sockfd,&str[0],str.size());
-    //    LOG_TRACE<<"write "<<n<<" bytes";
     loop_->assertInLoopThread();
-    EventLoop *ioLoop = NULL;
-    if (loopPoolPtr_ && loopPoolPtr_->size() > 0)
+    EventLoop *ioLoop = ioLoops_[nextLoopIdx_];
+    if (++nextLoopIdx_ >= numIoLoops_)
     {
-        ioLoop = loopPoolPtr_->getNextLoop();
+        nextLoopIdx_ = 0;
     }
-    if (ioLoop == NULL)
-        ioLoop = loop_;
-    std::shared_ptr<TcpConnectionImpl> newPtr;
-    if (sslCtxPtr_)
+    TcpConnectionPtr newPtr;
+    if (policyPtr_)
     {
-#ifdef USE_OPENSSL
+        assert(sslContextPtr_);
         newPtr = std::make_shared<TcpConnectionImpl>(
             ioLoop,
             sockfd,
             InetAddress(Socket::getLocalAddr(sockfd)),
             peer,
-            sslCtxPtr_);
-#else
-        LOG_FATAL << "OpenSSL is not found in your system!";
-        throw std::runtime_error("OpenSSL is not found in your system!");
-#endif
+            policyPtr_,
+            sslContextPtr_);
     }
     else
     {
@@ -102,7 +102,10 @@ void TcpServer::newConnection(int sockfd, const InetAddress &peer)
             if (writeCompleteCallback_)
                 writeCompleteCallback_(connectionPtr);
         });
-    newPtr->setCloseCallback(std::bind(&TcpServer::connectionClosed, this, _1));
+
+    newPtr->setCloseCallback([this](const TcpConnectionPtr &closeConnPtr) {
+        connectionClosed(closeConnPtr);
+    });
     connSet_.insert(newPtr);
     newPtr->connectEstablished();
 }
@@ -114,29 +117,15 @@ void TcpServer::start()
         started_ = true;
         if (idleTimeout_ > 0)
         {
-            timingWheelMap_[loop_] =
-                std::make_shared<TimingWheel>(loop_,
-                                              idleTimeout_,
-                                              1.0F,
-                                              idleTimeout_ < 500
-                                                  ? idleTimeout_ + 1
-                                                  : 100);
-            if (loopPoolPtr_)
+            for (EventLoop *loop : ioLoops_)
             {
-                auto loopNum = loopPoolPtr_->size();
-                while (loopNum > 0)
-                {
-                    // LOG_TRACE << "new Wheel loopNum=" << loopNum;
-                    auto poolLoop = loopPoolPtr_->getNextLoop();
-                    timingWheelMap_[poolLoop] =
-                        std::make_shared<TimingWheel>(poolLoop,
-                                                      idleTimeout_,
-                                                      1.0F,
-                                                      idleTimeout_ < 500
-                                                          ? idleTimeout_ + 1
-                                                          : 100);
-                    --loopNum;
-                }
+                timingWheelMap_[loop] =
+                    std::make_shared<TimingWheel>(loop,
+                                                  idleTimeout_,
+                                                  1.0F,
+                                                  idleTimeout_ < 500
+                                                      ? idleTimeout_ + 1
+                                                      : 100);
             }
         }
         LOG_TRACE << "map size=" << timingWheelMap_.size();
@@ -156,7 +145,7 @@ void TcpServer::stop()
         {
             connPtrs.push_back(conn);
         }
-        for (auto connection : connPtrs)
+        for (auto &connection : connPtrs)
         {
             connection->forceClose();
         }
@@ -173,7 +162,7 @@ void TcpServer::stop()
             {
                 connPtrs.push_back(conn);
             }
-            for (auto connection : connPtrs)
+            for (auto &connection : connPtrs)
             {
                 connection->forceClose();
             }
@@ -204,10 +193,8 @@ void TcpServer::handleCloseInLoop(const TcpConnectionPtr &connectionPtr)
     // may be in loop_'s current active channels, waiting to be processed.
     // If `connectDestroyed()` is called here, we will be using an wild pointer
     // later.
-    connLoop->queueInLoop([connectionPtr]() {
-        static_cast<TcpConnectionImpl *>(connectionPtr.get())
-            ->connectDestroyed();
-    });
+    connLoop->queueInLoop(
+        [connectionPtr]() { connectionPtr->connectDestroyed(); });
 }
 void TcpServer::connectionClosed(const TcpConnectionPtr &connectionPtr)
 {
@@ -223,7 +210,7 @@ void TcpServer::connectionClosed(const TcpConnectionPtr &connectionPtr)
     }
 }
 
-const std::string TcpServer::ipPort() const
+std::string TcpServer::ipPort() const
 {
     return acceptorPtr_->addr().toIpPort();
 }
@@ -240,20 +227,10 @@ void TcpServer::enableSSL(
     const std::vector<std::pair<std::string, std::string>> &sslConfCmds,
     const std::string &caPath)
 {
-#ifdef USE_OPENSSL
-    /* Create a new OpenSSL context */
-    sslCtxPtr_ =
-        newSSLServerContext(certPath, keyPath, useOldTLS, sslConfCmds, caPath);
-#else
-    // When not using OpenSSL, using `void` here will
-    // work around the unused parameter warnings without overhead.
-    (void)certPath;
-    (void)keyPath;
-    (void)useOldTLS;
-    (void)sslConfCmds;
-    (void)caPath;
-
-    LOG_FATAL << "OpenSSL is not found in your system!";
-    throw std::runtime_error("OpenSSL is not found in your system!");
-#endif
+    policyPtr_ = TLSPolicy::defaultServerPolicy(certPath, keyPath);
+    policyPtr_->setUseOldTLS(useOldTLS)
+        .setConfCmds(sslConfCmds)
+        .setCaPath(caPath)
+        .setValidate(caPath.empty() ? false : true);
+    sslContextPtr_ = newSSLContext(*policyPtr_, true);
 }

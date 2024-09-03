@@ -21,7 +21,8 @@
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
-#ifdef _WIN32
+#include <cstdint>
+#if defined(_WIN32) && !defined(_SSIZE_T_DEFINED)
 using ssize_t = std::intptr_t;
 #endif
 
@@ -206,7 +207,7 @@ class TRANTOR_EXPORT MsgBuffer
     void appendInt32(const uint32_t i);
 
     /**
-     * @brief Appaend a unsigned int64 value to the end of the buffer.
+     * @brief Append a unsigned int64 value to the end of the buffer.
      *
      * @param l
      */

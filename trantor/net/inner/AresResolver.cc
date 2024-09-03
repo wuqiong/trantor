@@ -52,10 +52,17 @@ bool Resolver::isCAresUsed()
 AresResolver::LibraryInitializer::LibraryInitializer()
 {
     ares_library_init(ARES_LIB_INIT_ALL);
+
+    hints_ = new ares_addrinfo_hints;
+    hints_->ai_flags = 0;
+    hints_->ai_family = AF_INET;
+    hints_->ai_socktype = 0;
+    hints_->ai_protocol = 0;
 }
 AresResolver::LibraryInitializer::~LibraryInitializer()
 {
     ares_library_cleanup();
+    delete hints_;
 }
 
 AresResolver::LibraryInitializer AresResolver::libraryInitializer_;
@@ -110,24 +117,26 @@ AresResolver::~AresResolver()
 }
 
 void AresResolver::resolveInLoop(const std::string& hostname,
-                                 const Callback& cb)
+                                 const ResolverResultsCallback& cb)
 {
     loop_->assertInLoopThread();
 #ifdef _WIN32
     if (hostname == "localhost")
     {
-        const static trantor::InetAddress localhost_{"127.0.0.1", 0};
+        const static std::vector<trantor::InetAddress> localhost_{
+            trantor::InetAddress{"127.0.0.1", 0}};
         cb(localhost_);
         return;
     }
 #endif
     init();
     QueryData* queryData = new QueryData(this, cb, hostname);
-    ares_gethostbyname(ctx_,
-                       hostname.c_str(),
-                       AF_INET,
-                       &AresResolver::ares_hostcallback_,
-                       queryData);
+    ares_getaddrinfo(ctx_,
+                     hostname.c_str(),
+                     NULL,
+                     libraryInitializer_.hints_,
+                     &AresResolver::ares_hostcallback_,
+                     queryData);
     struct timeval tv;
     struct timeval* tvp = ares_timeout(ctx_, NULL, &tv);
     double timeout = getSeconds(tvp);
@@ -165,27 +174,51 @@ void AresResolver::onTimer()
 }
 
 void AresResolver::onQueryResult(int status,
-                                 struct hostent* result,
+                                 struct ares_addrinfo* result,
                                  const std::string& hostname,
-                                 const Callback& callback)
+                                 const ResolverResultsCallback& callback)
 {
     LOG_TRACE << "onQueryResult " << status;
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof addr);
-    addr.sin_family = AF_INET;
-    addr.sin_port = 0;
+    auto inets_ptr = std::make_shared<std::vector<trantor::InetAddress>>();
     if (result)
     {
-        addr.sin_addr = *reinterpret_cast<in_addr*>(result->h_addr);
+        auto pptr = (struct ares_addrinfo_node*)result->nodes;
+        for (; pptr != NULL; pptr = pptr->ai_next)
+        {
+            trantor::InetAddress inet;
+            if (pptr->ai_family == AF_INET)
+            {
+                struct sockaddr_in* addr4 = (struct sockaddr_in*)pptr->ai_addr;
+                inets_ptr->emplace_back(trantor::InetAddress{*addr4});
+            }
+            else if (pptr->ai_family == AF_INET6)
+            {
+                struct sockaddr_in6* addr6 =
+                    (struct sockaddr_in6*)pptr->ai_addr;
+                inets_ptr->emplace_back(trantor::InetAddress{*addr6});
+            }
+            else
+            {
+                // TODO: Handle unknown family?
+            }
+        }
     }
-    InetAddress inet(addr);
+    if (inets_ptr->empty())
+    {
+        struct sockaddr_in addr;
+        memset(&addr, 0, sizeof addr);
+        addr.sin_family = AF_INET;
+        addr.sin_port = 0;
+        InetAddress inet(addr);
+        inets_ptr->emplace_back(std::move(inet));
+    }
     {
         std::lock_guard<std::mutex> lock(globalMutex());
         auto& addrItem = globalCache()[hostname];
-        addrItem.first = addr.sin_addr;
+        addrItem.first = inets_ptr;
         addrItem.second = trantor::Date::date();
     }
-    callback(inet);
+    callback(*inets_ptr);
 }
 
 void AresResolver::onSockCreate(int sockfd, int type)
@@ -202,9 +235,6 @@ void AresResolver::onSockCreate(int sockfd, int type)
 void AresResolver::onSockStateChange(int sockfd, bool read, bool write)
 {
     (void)write;
-    loop_->assertInLoopThread();
-    ChannelList::iterator it = channels_.find(sockfd);
-    assert(it != channels_.end());
     if (read)
     {
         // update
@@ -212,6 +242,9 @@ void AresResolver::onSockStateChange(int sockfd, bool read, bool write)
     }
     else if (*loopValid_)
     {
+        loop_->assertInLoopThread();
+        ChannelList::iterator it = channels_.find(sockfd);
+        assert(it != channels_.end());
         // remove
         it->second->disableAll();
         it->second->remove();
@@ -222,7 +255,7 @@ void AresResolver::onSockStateChange(int sockfd, bool read, bool write)
 void AresResolver::ares_hostcallback_(void* data,
                                       int status,
                                       int timeouts,
-                                      struct hostent* hostent)
+                                      struct ares_addrinfo* hostent)
 {
     (void)timeouts;
     QueryData* query = static_cast<QueryData*>(data);

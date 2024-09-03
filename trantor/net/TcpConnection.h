@@ -19,19 +19,20 @@
 #include <trantor/utils/NonCopyable.h>
 #include <trantor/utils/MsgBuffer.h>
 #include <trantor/net/callbacks.h>
+#include <trantor/net/Certificate.h>
+#include <trantor/net/TLSPolicy.h>
+#include <trantor/net/AsyncStream.h>
 #include <memory>
 #include <functional>
 #include <string>
 
 namespace trantor
 {
-class SSLContext;
-TRANTOR_EXPORT std::shared_ptr<SSLContext> newSSLServerContext(
-    const std::string &certPath,
-    const std::string &keyPath,
-    bool useOldTLS = false,
-    const std::vector<std::pair<std::string, std::string>> &sslConfCmds = {},
-    const std::string &caPath = "");
+class TimingWheel;
+
+struct SSLContext;
+using SSLContextPtr = std::shared_ptr<SSLContext>;
+
 /**
  * @brief This class represents a TCP connection.
  *
@@ -39,6 +40,10 @@ TRANTOR_EXPORT std::shared_ptr<SSLContext> newSSLServerContext(
 class TRANTOR_EXPORT TcpConnection
 {
   public:
+    friend class TcpServer;
+    friend class TcpConnectionImpl;
+    friend class TcpClient;
+
     TcpConnection() = default;
     virtual ~TcpConnection(){};
 
@@ -65,8 +70,8 @@ class TRANTOR_EXPORT TcpConnection
      * @param length
      */
     virtual void sendFile(const char *fileName,
-                          size_t offset = 0,
-                          size_t length = 0) = 0;
+                          long long offset = 0,
+                          long long length = 0) = 0;
     /**
      * @brief Send a file to the peer.
      *
@@ -75,8 +80,8 @@ class TRANTOR_EXPORT TcpConnection
      * @param length
      */
     virtual void sendFile(const wchar_t *fileName,
-                          size_t offset = 0,
-                          size_t length = 0) = 0;
+                          long long offset = 0,
+                          long long length = 0) = 0;
     /**
      * @brief Send a stream to the peer.
      *
@@ -92,10 +97,19 @@ class TRANTOR_EXPORT TcpConnection
                                                 // of data put in buffer
 
     /**
+     * @brief Send a stream to the peer asynchronously.
+     * @param disableKickoff Disable the kickoff mechanism. If this parameter is
+     * enabled, the connection will not be closed after the inactive timeout.
+     * @note The subsequent data sent after the async stream will be sent after
+     * the stream is closed.
+     */
+    virtual AsyncStreamPtr sendAsyncStream(bool disableKickoff = false) = 0;
+    /**
      * @brief Get the local address of the connection.
      *
      * @return const InetAddress&
      */
+
     virtual const InetAddress &localAddr() const = 0;
 
     /**
@@ -121,12 +135,12 @@ class TRANTOR_EXPORT TcpConnection
      */
     virtual bool disconnected() const = 0;
 
-    /**
+    /* *
      * @brief Get the buffer in which the received data stored.
      *
      * @return MsgBuffer*
      */
-    virtual MsgBuffer *getRecvBuffer() = 0;
+    // virtual MsgBuffer *getRecvBuffer() = 0;
 
     /**
      * @brief Set the high water mark callback
@@ -177,6 +191,7 @@ class TRANTOR_EXPORT TcpConnection
     {
         contextPtr_ = std::move(context);
     }
+    virtual std::string applicationProtocol() const = 0;
 
     /**
      * @brief Get the custom data from the connection.
@@ -248,38 +263,124 @@ class TRANTOR_EXPORT TcpConnection
     virtual bool isSSLConnection() const = 0;
 
     /**
-     * @brief Start the SSL encryption on the connection (as a client).
-     *
-     * @param callback The callback is called when the SSL connection is
-     * established.
-     * @param hostname The server hostname for SNI. If it is empty, the SNI is
-     * not used.
-     * @param sslConfCmds The commands used to call the SSL_CONF_cmd function in
-     * OpenSSL.
+     * @brief Get buffer of unprompted data.
      */
-    virtual void startClientEncryption(
-        std::function<void()> callback,
-        bool useOldTLS = false,
-        bool validateCert = true,
-        std::string hostname = "",
-        const std::vector<std::pair<std::string, std::string>> &sslConfCmds =
-            {}) = 0;
+    virtual MsgBuffer *getRecvBuffer() = 0;
 
     /**
-     * @brief Start the SSL encryption on the connection (as a server).
+     * @brief Get peer certificate (if any).
      *
-     * @param ctx The SSL context.
-     * @param callback The callback is called when the SSL connection is
-     * established.
+     * @return pointer to Certificate object or nullptr if no certificate was
+     * provided
      */
-    virtual void startServerEncryption(const std::shared_ptr<SSLContext> &ctx,
-                                       std::function<void()> callback) = 0;
+    virtual CertificatePtr peerCertificate() const = 0;
+
+    /**
+     * @brief Get the SNI name (for server connections only)
+     *
+     * @return Empty string if no SNI name was provided (not an SSL connection
+     * or peer did not provide SNI)
+     */
+    virtual std::string sniName() const = 0;
+
+    /**
+     * @brief Start TLS. If the connection is specified as a server, the
+     * connection will be upgraded to a TLS server connection. If the connection
+     * is specified as a client, the connection will be upgraded to a TLS client
+     * @note This method is only available for non-SSL connections.
+     */
+    virtual void startEncryption(TLSPolicyPtr policy,
+                                 bool isServer,
+                                 std::function<void(const TcpConnectionPtr &)>
+                                     upgradeCallback = nullptr) = 0;
+    /**
+     * @brief Start TLS as a client.
+     * @note This method is only available for non-SSL connections.
+     */
+    [[deprecated("Use startEncryption(TLSPolicyPtr) instead")]] void
+    startClientEncryption(
+        std::function<void(const TcpConnectionPtr &)> &&callback,
+        bool useOldTLS = false,
+        bool validateCert = true,
+        const std::string &hostname = "",
+        const std::vector<std::pair<std::string, std::string>> &sslConfCmds =
+            {})
+    {
+        auto policy = TLSPolicy::defaultClientPolicy();
+        policy->setUseOldTLS(useOldTLS)
+            .setValidate(validateCert)
+            .setHostname(hostname)
+            .setConfCmds(sslConfCmds);
+        startEncryption(std::move(policy), false, std::move(callback));
+    }
+
+    void setValidationPolicy(TLSPolicy &&policy)
+    {
+        tlsPolicy_ = std::move(policy);
+    }
+
+    void setRecvMsgCallback(const RecvMessageCallback &cb)
+    {
+        recvMsgCallback_ = cb;
+    }
+    void setRecvMsgCallback(RecvMessageCallback &&cb)
+    {
+        recvMsgCallback_ = std::move(cb);
+    }
+    void setConnectionCallback(const ConnectionCallback &cb)
+    {
+        connectionCallback_ = cb;
+    }
+    void setConnectionCallback(ConnectionCallback &&cb)
+    {
+        connectionCallback_ = std::move(cb);
+    }
+    void setWriteCompleteCallback(const WriteCompleteCallback &cb)
+    {
+        writeCompleteCallback_ = cb;
+    }
+    void setWriteCompleteCallback(WriteCompleteCallback &&cb)
+    {
+        writeCompleteCallback_ = std::move(cb);
+    }
+    void setCloseCallback(const CloseCallback &cb)
+    {
+        closeCallback_ = cb;
+    }
+    void setCloseCallback(CloseCallback &&cb)
+    {
+        closeCallback_ = std::move(cb);
+    }
+    void setSSLErrorCallback(const SSLErrorCallback &cb)
+    {
+        sslErrorCallback_ = cb;
+    }
+    void setSSLErrorCallback(SSLErrorCallback &&cb)
+    {
+        sslErrorCallback_ = std::move(cb);
+    }
+
+    // TODO: These should be internal APIs
+    virtual void connectEstablished() = 0;
+    virtual void connectDestroyed() = 0;
+    virtual void enableKickingOff(
+        size_t timeout,
+        const std::shared_ptr<TimingWheel> &timingWheel) = 0;
 
   protected:
-    bool validateCert_ = false;
+    // callbacks
+    RecvMessageCallback recvMsgCallback_;
+    ConnectionCallback connectionCallback_;
+    CloseCallback closeCallback_;
+    WriteCompleteCallback writeCompleteCallback_;
+    HighWaterMarkCallback highWaterMarkCallback_;
+    SSLErrorCallback sslErrorCallback_;
+    TLSPolicy tlsPolicy_;
 
   private:
     std::shared_ptr<void> contextPtr_;
 };
+TRANTOR_EXPORT SSLContextPtr newSSLContext(const TLSPolicy &policy,
+                                           bool server);
 
 }  // namespace trantor

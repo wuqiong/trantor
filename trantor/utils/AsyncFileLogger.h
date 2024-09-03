@@ -70,6 +70,29 @@ class TRANTOR_EXPORT AsyncFileLogger : NonCopyable
     }
 
     /**
+     * @brief Set the max number of log files. When the number exceeds the
+     * limit, the oldest log file will be deleted.
+     *
+     * @param maxFiles
+     */
+    void setMaxFiles(size_t maxFiles)
+    {
+        maxFiles_ = maxFiles;
+    }
+
+    /**
+     * @brief Set whether to switch the log file when the AsyncFileLogger object
+     * is destroyed. If this flag is set to true, the log file is not switched
+     * when the AsyncFileLogger object is destroyed.
+     *
+     * @param flag
+     */
+    void setSwitchOnLimitOnly(bool flag = true)
+    {
+        switchOnLimitOnly_ = flag;
+    }
+
+    /**
      * @brief Set the log file name.
      *
      * @param baseName The base name of the log file.
@@ -107,14 +130,22 @@ class TRANTOR_EXPORT AsyncFileLogger : NonCopyable
     std::string fileBaseName_{"trantor"};
     std::string fileExtName_{".log"};
     uint64_t sizeLimit_{20 * 1024 * 1024};
+    bool switchOnLimitOnly_{false};  // by default false, will generate new
+                                     // file name on each destroy.
+    size_t maxFiles_{0};
+
     class LoggerFile : NonCopyable
     {
       public:
         LoggerFile(const std::string &filePath,
                    const std::string &fileBaseName,
-                   const std::string &fileExtName);
+                   const std::string &fileExtName,
+                   bool switchOnLimitOnly = false,
+                   size_t maxFiles = 0);
         ~LoggerFile();
         void writeLog(const StringPtr buf);
+        void open();
+        void switchLog(bool openNewOne);
         uint64_t getLength();
         explicit operator bool() const
         {
@@ -123,6 +154,9 @@ class TRANTOR_EXPORT AsyncFileLogger : NonCopyable
         void flush();
 
       protected:
+        void initFilenameQueue();
+        void deleteOldFiles();
+
         FILE *fp_{nullptr};
         Date creationDate_;
         std::string fileFullName_;
@@ -130,6 +164,12 @@ class TRANTOR_EXPORT AsyncFileLogger : NonCopyable
         std::string fileBaseName_;
         std::string fileExtName_;
         static uint64_t fileSeq_;
+        bool switchOnLimitOnly_{false};  // by default false, will generate new
+                                         // file name on each destroy
+
+        size_t maxFiles_{0};
+        // store generated filenames
+        std::deque<std::string> filenameQueue_;
     };
     std::unique_ptr<LoggerFile> loggerFilePtr_;
 

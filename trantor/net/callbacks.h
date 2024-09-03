@@ -21,7 +21,8 @@ namespace trantor
 enum class SSLError
 {
     kSSLHandshakeError,
-    kSSLInvalidCertificate
+    kSSLInvalidCertificate,
+    kSSLProtocolError
 };
 using TimerCallback = std::function<void()>;
 
@@ -39,5 +40,6 @@ using WriteCompleteCallback = std::function<void(const TcpConnectionPtr &)>;
 using HighWaterMarkCallback =
     std::function<void(const TcpConnectionPtr &, const size_t)>;
 using SSLErrorCallback = std::function<void(SSLError)>;
+using SockOptCallback = std::function<void(int)>;
 
 }  // namespace trantor

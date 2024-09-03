@@ -28,7 +28,9 @@
 #include <windows.h>
 #include <io.h>
 #include <synchapi.h>
+#ifndef _SSIZE_T_DEFINED
 using ssize_t = long long;
+#endif
 #else
 #include <poll.h>
 #endif
@@ -241,7 +243,8 @@ void EventLoop::loop()
     catch (std::exception &e)
     {
         LOG_WARN << "Exception thrown from event loop, rethrowing after "
-                    "running functions on quit";
+                    "running functions on quit: "
+                 << e.what();
         loopException = std::current_exception();
     }
 
