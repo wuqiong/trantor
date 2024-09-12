@@ -171,6 +171,7 @@ void TcpClient::newConnection(int sockfd)
     conn->setConnectionCallback(connectionCallback_);
     conn->setRecvMsgCallback(messageCallback_);
     conn->setWriteCompleteCallback(writeCompleteCallback_);
+    conn->setHighWaterMarkCallback(writeHighWaterMarkCallback_, highWaterMarkLen_);
 
     std::weak_ptr<TcpClient> weakSelf(shared_from_this());
     auto closeCb = std::function<void(const TcpConnectionPtr &)>(

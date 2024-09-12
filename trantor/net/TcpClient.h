@@ -177,6 +177,17 @@ class TRANTOR_EXPORT TcpClient : NonCopyable,
         writeCompleteCallback_ = std::move(cb);
     }
 
+    void setHighWaterMarkCallback(const HighWaterMarkCallback &cb, size_t markLen)
+    {
+        writeHighWaterMarkCallback_ = cb;
+        highWaterMarkLen_ = markLen;
+    }
+    void setHighWaterMarkCallback(HighWaterMarkCallback &&cb, size_t markLen)
+    {
+        writeHighWaterMarkCallback_ = std::move(cb);
+        highWaterMarkLen_ = markLen;
+    }
+
     /**
      * @brief Set the callback for errors of SSL
      * @param cb The callback is called when an SSL error occurs.
@@ -244,6 +255,8 @@ class TRANTOR_EXPORT TcpClient : NonCopyable,
     ConnectionErrorCallback connectionErrorCallback_;
     RecvMessageCallback messageCallback_;
     WriteCompleteCallback writeCompleteCallback_;
+    HighWaterMarkCallback writeHighWaterMarkCallback_;
+    size_t highWaterMarkLen_;
     SSLErrorCallback sslErrorCallback_;
     std::atomic_bool retry_;    // atomic
     std::atomic_bool connect_;  // atomic

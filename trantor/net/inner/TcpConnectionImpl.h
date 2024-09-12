@@ -132,6 +132,7 @@ class TcpConnectionImpl : public TcpConnection,
         return idleTimeout_ == 0;
     }
     void setTcpNoDelay(bool on) override;
+    void setReadable(bool on) override;
     void shutdown() override;
     void forceClose() override;
     EventLoop *getLoop() override

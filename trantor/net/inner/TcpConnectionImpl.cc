@@ -249,6 +249,10 @@ void TcpConnectionImpl::writeCallback()
                 shutdown();
             }
         }
+        if(writeCompleteCallback_)
+        {
+            writeCompleteCallback_(shared_from_this());
+        }
     }
     else
     {
@@ -317,6 +321,19 @@ void TcpConnectionImpl::setTcpNoDelay(bool on)
 {
     socketPtr_->setTcpNoDelay(on);
 }
+
+void TcpConnectionImpl::setReadable(bool yes)
+{
+    if (yes)
+    {
+        ioChannelPtr_->enableReading();
+    }
+    else
+    {
+        ioChannelPtr_->disableReading();
+    }
+}
+
 void TcpConnectionImpl::connectDestroyed()
 {
     loop_->assertInLoopThread();

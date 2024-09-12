@@ -160,6 +160,13 @@ class TRANTOR_EXPORT TcpConnection
     virtual void setTcpNoDelay(bool on) = 0;
 
     /**
+     * @brief Set the Readable ON/OFF
+     *
+     * @param on
+     */
+    virtual void setReadable(bool on) = 0;
+
+    /**
      * @brief Shutdown the connection.
      * @note This method only closes the writing direction.
      */
