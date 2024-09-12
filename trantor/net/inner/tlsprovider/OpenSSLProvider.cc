@@ -738,6 +738,7 @@ struct OpenSSLProvider : public TLSProvider, public NonCopyable
             if (n == 0 && (shutdownState & SSL_RECEIVED_SHUTDOWN))
             {
                 LOG_TRACE << "SSL connection closed by peer";
+                SSL_set_quiet_shutdown(ssl_, 1);
                 conn_->shutdown();
                 return;
             }
