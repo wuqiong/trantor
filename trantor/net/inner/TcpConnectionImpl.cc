@@ -324,13 +324,21 @@ void TcpConnectionImpl::setTcpNoDelay(bool on)
 
 void TcpConnectionImpl::setReadable(bool yes)
 {
-    if (yes)
+    if (loop_->isInLoopThread())
     {
-        ioChannelPtr_->enableReading();
+        if (yes)
+            this->ioChannelPtr_->enableReading();
+        else
+            this->ioChannelPtr_->disableReading();
     }
     else
     {
-        ioChannelPtr_->disableReading();
+        loop_->runInLoop([thisPtr = shared_from_this(), yes]() {
+            if (yes)
+                thisPtr->ioChannelPtr_->enableReading();
+            else
+                thisPtr->ioChannelPtr_->disableReading();
+        });
     }
 }
 
