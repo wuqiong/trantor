@@ -337,10 +337,10 @@ void TcpConnectionImpl::setReadable(bool yes)
 void TcpConnectionImpl::connectDestroyed()
 {
     loop_->assertInLoopThread();
+    ioChannelPtr_->disableAll();
     if (status_ == ConnStatus::Connected)
     {
         status_ = ConnStatus::Disconnected;
-        ioChannelPtr_->disableAll();
 
         connectionCallback_(shared_from_this());
     }
